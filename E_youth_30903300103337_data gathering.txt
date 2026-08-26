@@ -1,0 +1,271 @@
+TASK 1 — DATA GATHERING AND COMBINATION
+City Library / Reading Program — Level 3 AI&DS Final Project
+================================================================
+
+PART A — FIVE SQL QUESTIONS ABOUT THE LIBRARY
+================================================================
+
+Before writing any query, I explored the database structure:
+  members(member_id PK, first_name, last_name, grade, neighborhood,
+          membership_status, join_date)
+  books(book_id PK, title, author)
+  checkouts(checkout_id, member_id FK -> members, book_id FK -> books,
+            checkout_date, return_date)
+
+Two data-quality issues showed up during this exploration and affected
+how I wrote the queries below:
+  - `neighborhood` has inconsistent casing/whitespace (e.g. "Maadi",
+    "Maadi ", "NASR CITY", "Nasr  City", "zamalek").
+  - `membership_status` similarly has inconsistent casing ("Active",
+    "active", "INACTIVE", ...).
+None of the five questions required filtering by these fields except
+Q5, so I only needed to clean neighborhood there (see below).
+
+
+----------------------------------------------------------------
+Q1. How much is each member borrowing?
+----------------------------------------------------------------
+Goal: a per-member checkout count that includes members who have
+never borrowed a book at all (count = 0), not just members who show
+up in the checkouts table.
+
+Reasoning: an INNER JOIN would silently drop members with zero
+checkouts, which the task explicitly says the coordinator needs to
+see. So members must be the "anchor" table with a LEFT JOIN out to
+checkouts, and COUNT() must count the checkout_id column (not member
+columns) so that a missing checkout is counted as 0, not NULL->1.
+
+SQL:
+SELECT
+    m.member_id,
+    m.first_name || ' ' || m.last_name AS member_name,
+    COUNT(c.checkout_id) AS total_checkouts
+FROM members m
+LEFT JOIN checkouts c ON c.member_id = m.member_id
+GROUP BY m.member_id, m.first_name, m.last_name
+ORDER BY total_checkouts DESC, m.member_id;
+
+Result: ran cleanly, 80 rows returned (one per member). Top borrower
+is Aya Wahba (1034) with 25 checkouts; 17 members show 0 checkouts,
+confirming the LEFT JOIN kept them in the result.
+
+
+----------------------------------------------------------------
+Q2. Which books match a chosen author pattern?
+----------------------------------------------------------------
+Chosen pattern: authors whose name contains "Amina" (e.g. searching
+for every book by an author named Amina, without needing the exact
+full name).
+
+SQL:
+SELECT book_id, title, author
+FROM books
+WHERE author LIKE '%Amina%'
+ORDER BY author, title;
+
+Result: 2 rows — "The Silver Kite" and "Desert Compass", both by
+Amina Darwish.
+
+
+----------------------------------------------------------------
+Q3. What are the 5 most popular books?
+----------------------------------------------------------------
+Goal: the five titles checked out the most times, ranked highest to
+lowest.
+
+Reasoning: this needs an INNER JOIN (not LEFT) because we only care
+about books that were actually checked out at least once; a book
+with 0 checkouts shouldn't appear in a "most popular" ranking anyway,
+and COUNT + GROUP BY + ORDER BY DESC + LIMIT 5 naturally produces the
+top 5.
+
+SQL:
+SELECT
+    b.book_id, b.title, b.author,
+    COUNT(c.checkout_id) AS times_checked_out
+FROM checkouts c
+JOIN books b ON b.book_id = c.book_id
+GROUP BY b.book_id, b.title, b.author
+ORDER BY times_checked_out DESC
+LIMIT 5;
+
+Result:
+  501  The Silver Kite          Amina Darwish     57
+  507  Fossils and Fireflies    Dalia Serry       55
+  513  Circuits for Beginners   Galal Mounir      46
+  519  Kites Over Cairo         Jasmine Wahdan    38
+  525  Storms and Sailboats     Mahmoud Rafei     25
+
+
+----------------------------------------------------------------
+Q4. Who are the 10 most active readers?
+----------------------------------------------------------------
+Goal: the ten members who have borrowed the most books, ranked
+highest to lowest.
+
+Reasoning: unlike Q1, this ranking only makes sense for members who
+have actually borrowed something, so an INNER JOIN is correct here
+(members with 0 checkouts don't belong in an "active readers"
+ranking). Otherwise, same COUNT + GROUP BY + ORDER BY DESC + LIMIT
+pattern as Q3.
+
+SQL:
+SELECT
+    m.member_id,
+    m.first_name || ' ' || m.last_name AS member_name,
+    COUNT(c.checkout_id) AS total_checkouts
+FROM members m
+JOIN checkouts c ON c.member_id = m.member_id
+GROUP BY m.member_id, m.first_name, m.last_name
+ORDER BY total_checkouts DESC
+LIMIT 10;
+
+Result:
+  1034  Aya Wahba       25
+  1044  Sherif Saleh    21
+  1008  Ziad Saleh      19
+  1010  Nour Nabil      18
+  1027  Mostafa Fouad   18
+  1018  Ahmed Shafik    17
+  1024  Youssef Hegazy  17
+  1065  Adam Fahmy      17
+  1030  Reem Osman      16
+  1047  Sara Rashad     16
+
+
+----------------------------------------------------------------
+Q5. What does a neighborhood's activity look like further back in time?
+----------------------------------------------------------------
+Goal: see how checkout activity per neighborhood compares across
+time, not just as a single lifetime total.
+
+Reasoning: the checkout_date values span two calendar years (2024
+and 2025), so "further back in time" means breaking activity down
+by year per neighborhood, so the coordinator can see whether a
+neighborhood's engagement is growing, shrinking, or steady year over
+year. Because neighborhood text is inconsistent ("Maadi" vs
+"Maadi " vs different casing), I normalized it with TRIM(UPPER(...))
+before grouping - otherwise "Maadi" and "MAADI " would be counted as
+two different neighborhoods and understate real totals.
+
+SQL:
+SELECT
+    TRIM(UPPER(m.neighborhood)) AS neighborhood_clean,
+    strftime('%Y', c.checkout_date) AS checkout_year,
+    COUNT(c.checkout_id) AS total_checkouts
+FROM members m
+JOIN checkouts c ON c.member_id = m.member_id
+GROUP BY neighborhood_clean, checkout_year
+ORDER BY neighborhood_clean, checkout_year;
+
+Result:
+  HELIOPOLIS   2024   41
+  HELIOPOLIS   2025   45
+  MAADI        2024   49
+  MAADI        2025   58
+  NASR CITY    2024   31
+  NASR CITY    2025   69
+  SHUBRA       2024   19
+  SHUBRA       2025   15
+  ZAMALEK      2024   33
+  ZAMALEK      2025   31
+
+Nasr City more than doubled its checkouts from 2024 to 2025, while
+Shubra actually declined slightly - useful signal for where the
+program might want to invest outreach.
+
+
+PART B — BRINGING THE THREE SOURCES TOGETHER
+================================================================
+Output file: task1_combined_data.csv (417 rows, 19 columns)
+
+Stage 1 — Members + Checkouts (pandas only, no SQL):
+  Loaded the raw `members` and `checkouts` tables (391 rows) and
+  left-merged checkouts onto members by member_id, so every checkout
+  keeps its member details and no checkout is dropped or mismatched.
+  Verified row count stayed at 391 and no checkout ended up with a
+  missing member. Also computed each member's running total checkout
+  count as its own column.
+
+Stage 2 — Book details:
+  Merged the book catalog JSON (genre, pages, publication_year,
+  publisher) with the books table (title, author) on book_id, then
+  merged that onto the Stage 1 result. Verified the row count still
+  stayed at 391 (only columns were added, no rows created or
+  dropped) and no checkout ended up missing its book details.
+
+Stage 3 — Reading Kickoff checkouts (scraped from HTML):
+  Used pandas.read_html() to pull the checkout table off the event
+  signup page (26 rows: member_id, book_id, checkout_date). Enriched
+  it the same way as Stage 2 (member details + book details) so it
+  matches the schema of the database checkouts, then concatenated it
+  onto the Stage 1+2 result. Re-computed each member's total
+  checkout count across BOTH sources combined.
+
+  Data quality finding: 3 of the 26 Reading Kickoff rows (member IDs
+  1104, 1150, 1201) reference member IDs that do not exist anywhere
+  in the members table. This makes sense given the page's own
+  explanation - kids could check out a book "without presenting
+  their library card," so a handful of these checkouts belong to
+  people who were never registered as library members at all. Per
+  the task instructions, every row from the Reading Kickoff page was
+  kept in the final result regardless (nothing was silently
+  dropped); those 3 rows simply have blank member-detail columns
+  (name, grade, neighborhood, etc.) and are flagged by a "source"
+  column set to "reading_kickoff" so they're easy to isolate for
+  follow-up (e.g. registering those students, or fixing the sign-in
+  sheet next year).
+
+Final combined file:
+  391 checkouts from the database + 26 from the Reading Kickoff page
+  = 417 total rows, each carrying member info, book info (title,
+  author, genre, pages, publication_year, publisher), checkout/return
+  dates, a running total-checkouts-per-member, and a "source" column
+  distinguishing where the row came from.
+
+Sanity checks performed before saving:
+  - Row counts asserted at every merge step (no accidental row
+    duplication or loss from a many-to-many join).
+  - Checked for and reported nulls introduced by each merge instead
+    of silently ignoring them.
+  - Printed head/tail and value_counts on the "source" column to
+    confirm both sources actually landed in the file.
+
+
+REFLECT — Does pulling a table out of the event signups HTML page
+count as an API, or as scraping — and does that distinction matter here?
+================================================================
+Pulling the Reading Kickoff table out of that HTML page is scraping,
+not calling an API, and the distinction genuinely mattered for this
+project.
+
+An API is built for programs: it hands back data in a predictable,
+structured format (like JSON) with a stable contract - the same
+field names and types every time, regardless of how the page might
+be redesigned visually. A web page like the Reading Kickoff signup
+sheet, on the other hand, is built for a person's browser: pandas'
+read_html() only worked here because the checkouts happened to be
+sitting inside a plain <table> element with clean <tr>/<td> rows. If
+that same data had been laid out as a list of styled <div>s, or
+spread across multiple pages, or rendered by JavaScript after the
+page loaded, a simple table-extraction call would have failed or
+silently returned nothing, and I'd have needed real HTML parsing
+(BeautifulSoup, CSS selectors) instead of one line of pandas.
+
+The distinction mattered for this project in two concrete ways:
+  1. Reliability: the JSON book catalog is a stable, structured
+     contract - I know exactly what keys to expect every time. The
+     scraped table depends on the page's current markup staying the
+     same; if the library ever redesigns that page, my extraction
+     step breaks even though nothing about the underlying data
+     changed.
+  2. Data quality: the page itself told me the checkouts on it were
+     "recorded by hand" by volunteers rather than entered through the
+     normal system - and sure enough, 3 of those hand-recorded rows
+     referenced member IDs that don't exist in the members table.
+     An API sourced directly from the same system as the database
+     would be far less likely to contain that kind of mismatch,
+     because it would be validated against the same member records
+     at the point of entry. Scraped, human-entered data needed
+     extra validation (checking for orphaned member/book IDs) that
+     the JSON catalog and the database itself didn't need.
