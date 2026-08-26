@@ -1,1 +1,5 @@
+14e8df1 Complete Task3 Data Fairnes
+2a302c5 Complete Task2
+3088b94 Complete Task1
+d078258 save Git history log
 2e3cefa Initialize repository
